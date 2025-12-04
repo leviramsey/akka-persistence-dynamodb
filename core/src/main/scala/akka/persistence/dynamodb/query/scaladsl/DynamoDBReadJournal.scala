@@ -125,10 +125,8 @@ final class DynamoDBReadJournal(system: ExtendedActorSystem, config: Config, cfg
       slice: Int): BySliceQuery[SerializedJournalItem, EventEnvelope[Event]] = {
     val createEnvelope: (TimestampOffset, SerializedJournalItem) => EventEnvelope[Event] = createEventEnvelope
     val extractOffset = (env: EventEnvelope[Event]) => env.offset.asInstanceOf[TimestampOffset]
-    val createHeartbeat = (timestamp: Instant) =>
-      Some(createEventEnvelopeHeartbeat[Event](entityType, slice, timestamp))
 
-    new BySliceQuery(queryDao, createEnvelope, extractOffset, createHeartbeat, clock, settings, log)
+    new BySliceQuery(queryDao, createEnvelope, extractOffset, clock, settings, log)
   }
 
   private def snapshotsBySlice[Snapshot, Event](
@@ -139,10 +137,8 @@ final class DynamoDBReadJournal(system: ExtendedActorSystem, config: Config, cfg
       (offset, row) => createEnvelopeFromSnapshot(row, offset, transformSnapshot)
 
     val extractOffset: EventEnvelope[Event] => TimestampOffset = env => env.offset.asInstanceOf[TimestampOffset]
-    val createHeartbeat = (timestamp: Instant) =>
-      Some(createEventEnvelopeHeartbeat[Event](entityType, slice, timestamp))
 
-    new BySliceQuery(snapshotDao, createEnvelope, extractOffset, createHeartbeat, clock, settings, log)
+    new BySliceQuery(snapshotDao, createEnvelope, extractOffset, clock, settings, log)
   }
 
   private def createEnvelopeFromSnapshot[Snapshot, Event](
@@ -301,8 +297,19 @@ final class DynamoDBReadJournal(system: ExtendedActorSystem, config: Config, cfg
 
     val dbSource = bySliceQueries.head.mergeAll(bySliceQueries.tail, eagerComplete = false)
     if (settings.journalPublishEvents) {
+      val initialHeartbeats = (minSlice to maxSlice).flatMap { slice =>
+        sliceStartOffset(slice, offset) match {
+          case t: TimestampOffset =>
+            Some(
+              createEventEnvelopeHeartbeat[Event](
+                entityType,
+                slice,
+                t.timestamp.minus(JDuration.ofMillis(settings.querySettings.backtrackingWindow.toMillis))))
+          case _ => None
+        }
+      }
       val pubSubSource = eventsBySlicesPubSubSource[Event](entityType, minSlice, maxSlice)
-      mergeDbAndPubSubSources(dbSource, pubSubSource)
+      mergeDbAndPubSubSources(dbSource, pubSubSource, initialHeartbeats)
     } else
       dbSource
   }
@@ -437,8 +444,19 @@ final class DynamoDBReadJournal(system: ExtendedActorSystem, config: Config, cfg
 
     val dbSource = bySliceQueries.head.mergeAll(bySliceQueries.tail, eagerComplete = false)
     if (settings.journalPublishEvents) {
+      val initialHeartbeats = (minSlice to maxSlice).flatMap { slice =>
+        sliceStartOffset(slice, offset) match {
+          case t: TimestampOffset =>
+            Some(
+              createEventEnvelopeHeartbeat[Event](
+                entityType,
+                slice,
+                t.timestamp.minus(JDuration.ofMillis(settings.querySettings.backtrackingWindow.toMillis))))
+          case _ => None
+        }
+      }
       val pubSubSource = eventsBySlicesPubSubSource[Event](entityType, minSlice, maxSlice)
-      mergeDbAndPubSubSources(dbSource, pubSubSource)
+      mergeDbAndPubSubSources(dbSource, pubSubSource, initialHeartbeats)
     } else
       dbSource
   }
@@ -510,14 +528,21 @@ final class DynamoDBReadJournal(system: ExtendedActorSystem, config: Config, cfg
 
   private def mergeDbAndPubSubSources[Event, Snapshot](
       dbSource: Source[EventEnvelope[Event], NotUsed],
-      pubSubSource: Source[EventEnvelope[Event], NotUsed]) = {
-    dbSource
-      .mergePrioritized(pubSubSource, leftPriority = 1, rightPriority = 10)
-      .via(
-        skipPubSubTooFarAhead(
-          settings.querySettings.backtrackingEnabled,
-          JDuration.ofMillis(settings.querySettings.backtrackingWindow.toMillis)))
-      .via(deduplicate(settings.querySettings.deduplicateCapacity))
+      pubSubSource: Source[EventEnvelope[Event], NotUsed],
+      initialHeartbeats: Iterable[EventEnvelope[Event]]) = {
+    val dbMergedWithPubsub =
+      dbSource
+        .mergePrioritized(pubSubSource, leftPriority = 1, rightPriority = 10)
+
+    val base =
+      if (settings.querySettings.backtrackingEnabled) {
+        Source
+          .fromIterator(() => initialHeartbeats.iterator)
+          .concat(dbMergedWithPubsub)
+          .via(handlePubSubTooFarAhead(JDuration.ofMillis(settings.querySettings.backtrackingWindow.toMillis)))
+      } else dbMergedWithPubsub
+
+    base.via(deduplicate(settings.querySettings.deduplicateCapacity))
   }
 
   /**
@@ -560,72 +585,81 @@ final class DynamoDBReadJournal(system: ExtendedActorSystem, config: Config, cfg
     }
   }
 
-  /**
-   * INTERNAL API
-   */
-  @InternalApi private[akka] def skipPubSubTooFarAhead[Event](
-      enabled: Boolean,
-      maxAheadOfBacktracking: JDuration): Flow[EventEnvelope[Event], EventEnvelope[Event], NotUsed] = {
-    if (!enabled)
-      Flow[EventEnvelope[Event]]
-    else
-      Flow[EventEnvelope[Event]]
-        .statefulMapConcat(() => {
-          // track backtracking offset per slice
-          var latestBacktrackingPerSlice = Map.empty[Int, Instant]
-          def latestBacktracking(slice: Int): Instant = latestBacktrackingPerSlice.get(slice) match {
-            case Some(instant) => instant
-            case None          => Instant.EPOCH
-          }
-          env => {
-            val slice = persistenceExt.sliceForPersistenceId(env.persistenceId)
-            env.offset match {
-              case t: TimestampOffset =>
-                if (EnvelopeOrigin.fromQuery(env)) {
-                  if (log.isDebugEnabled()) {
-                    val l = latestBacktracking(slice)
-                    if (l.isAfter(t.timestamp))
-                      log.debug(
-                        "event from query for persistenceId [{}] seqNr [{}] " +
-                        s"timestamp [{}] was before last event from backtracking or heartbeat [{}].",
-                        env.persistenceId,
-                        env.sequenceNr,
-                        t.timestamp,
-                        l)
-                  }
+  /** INTERNAL API */
+  @nowarn("msg=eventMetadata in class EventEnvelope is deprecated")
+  @InternalApi private[akka] def handlePubSubTooFarAhead[Event](
+      backtrackingWindow: JDuration): Flow[EventEnvelope[Event], EventEnvelope[Event], NotUsed] = {
+    Flow[EventEnvelope[Event]]
+      .statefulMapConcat(() => {
+        // track backtracking offsets per slice
+        var latestBacktrackingPerSlice = Map.empty[Int, Instant]
+        def latestBacktracking(slice: Int): Instant = latestBacktrackingPerSlice.get(slice) match {
+          case Some(instant) => instant
+          case None          => Instant.EPOCH
+        }
 
+        env => {
+          val slice = persistenceExt.sliceForPersistenceId(env.persistenceId)
+          val l = latestBacktracking(slice)
+          env.offset match {
+            case t: TimestampOffset =>
+              if (EnvelopeOrigin.fromQuery(env)) {
+                if (log.isDebugEnabled() && l.isAfter(t.timestamp)) {
+                  log.debug(
+                    "event from query for persistenceId [{}] seqNr [{}] " +
+                    s"timestamp [{}] was before last event from backtracking or heartbeat [{}].",
+                    env.persistenceId,
+                    env.sequenceNr,
+                    t.timestamp,
+                    l)
+                }
+                env :: Nil
+              } else {
+                if (EnvelopeOrigin.fromBacktracking(env)) {
+                  if (l.isBefore(t.timestamp)) {
+                    latestBacktrackingPerSlice = latestBacktrackingPerSlice.updated(slice, t.timestamp)
+                  }
                   env :: Nil
-                } else {
-                  if (EnvelopeOrigin.fromBacktracking(env)) {
+                } else if (EnvelopeOrigin.fromHeartbeat(env)) {
+                  if (l.isBefore(t.timestamp)) {
                     latestBacktrackingPerSlice = latestBacktrackingPerSlice.updated(slice, t.timestamp)
-                    env :: Nil
-                  } else if (EnvelopeOrigin.fromHeartbeat(env)) {
-                    latestBacktrackingPerSlice = latestBacktrackingPerSlice.updated(slice, t.timestamp)
-                    Nil // always drop heartbeats
-                  } else if (EnvelopeOrigin.fromPubSub(env) && latestBacktracking(slice) == Instant.EPOCH) {
+                  }
+                  Nil // heartbeats are an internal implementation and must never leak out
+                } else if (EnvelopeOrigin.fromPubSub(env)) {
+                  if (l == Instant.EPOCH) {
                     log.trace(
                       "Dropping pubsub event for persistenceId [{}] seqNr [{}] because no event from backtracking yet.",
                       env.persistenceId,
                       env.sequenceNr)
                     Nil
-                  } else if (EnvelopeOrigin.fromPubSub(env) && JDuration
-                      .between(latestBacktracking(slice), t.timestamp)
-                      .compareTo(maxAheadOfBacktracking) > 0) {
-                    // drop from pubsub when too far ahead from backtracking
-                    log.debug(
-                      "Dropping pubsub event for persistenceId [{}] seqNr [{}] because too far ahead of backtracking.",
+                  } else if (JDuration.between(l, t.timestamp).compareTo(backtrackingWindow) > 0) {
+                    // far ahead of backtracking, so adjust the offset (the timestamp in the envelope is unaffected)
+                    // so as to prevent the offset from being moved too far ahead
+                    val offset = TimestampOffset(l.plus(backtrackingWindow), t.readTimestamp, t.seen)
+                    val emittedEnv = new EventEnvelope(
+                      offset,
                       env.persistenceId,
-                      env.sequenceNr)
-                    Nil
+                      env.sequenceNr,
+                      env.eventOption,
+                      env.timestamp,
+                      env.eventMetadata,
+                      env.entityType,
+                      env.slice,
+                      env.filtered,
+                      env.source,
+                      env.tags)
+                    emittedEnv :: Nil
                   } else {
                     env :: Nil
                   }
+                } else {
+                  env :: Nil
                 }
-              case _ =>
-                env :: Nil
-            }
+              }
+            case _ => env :: Nil
           }
-        })
+        }
+      })
   }
 
   // EventTimestampQuery
