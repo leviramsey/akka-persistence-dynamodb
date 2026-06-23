@@ -18,7 +18,10 @@ object TestConfig {
       akka.persistence.snapshot-store.plugin = "akka.persistence.dynamodb.snapshot"
       akka.persistence.dynamodb.client.local.enabled = true
       akka.actor.testkit.typed.default-timeout = 10s
-      """)
+      akka.persistence.dynamodb.validate-deserialization = on
+      """ +
+      s"\nakka.actor.serializers.unlucky-string = \"${classOf[akka.persistence.dynamodb.UnluckyStringSerializer].getName}\"" +
+      s"\nakka.actor.serialization-bindings.\"${classOf[akka.persistence.dynamodb.UnluckyString].getName}\" = unlucky-string")
       .withFallback(defaultConfig)
   }
 

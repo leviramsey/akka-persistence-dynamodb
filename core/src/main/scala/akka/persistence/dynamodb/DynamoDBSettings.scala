@@ -67,6 +67,8 @@ object DynamoDBSettings {
 
     val snapshotFallbackSettings = SnapshotFallbackSettings(config.getConfig("snapshot.fallback-store"))
 
+    val validateDeserialization = config.getBoolean("validate-deserialization")
+
     new DynamoDBSettings(
       journalTable,
       journalPublishEvents,
@@ -78,7 +80,8 @@ object DynamoDBSettings {
       snapshotBySliceGsi,
       clockSkewSettings,
       journalFallbackSettings,
-      snapshotFallbackSettings)
+      snapshotFallbackSettings,
+      validateDeserialization)
   }
 
   /**
@@ -103,13 +106,15 @@ final class DynamoDBSettings private (
     val snapshotBySliceGsi: String,
     val clockSkewSettings: ClockSkewSettings,
     val journalFallbackSettings: JournalFallbackSettings,
-    val snapshotFallbackSettings: SnapshotFallbackSettings) {
+    val snapshotFallbackSettings: SnapshotFallbackSettings,
+    val validateDeserialization: Boolean) {
   override def toString: String =
     s"DynamoDBSettings(journalTable=$journalTable, journalPublishEvents=$journalPublishEvents, " +
     s"snapshotTable=$snapshotTable, querySettings=$querySettings, cleanupSettings=$cleanupSettings, " +
     s"timeToLiveSettings=$timeToLiveSettings, journalBySliceGsi=$journalBySliceGsi, " +
     s"snapshotBySliceGsi=$snapshotBySliceGsi, clockSkewSettings=$clockSkewSettings, " +
-    s"journalFallbackSettings=$journalFallbackSettings, snapshotFallbackSettings=$snapshotFallbackSettings)"
+    s"journalFallbackSettings=$journalFallbackSettings, snapshotFallbackSettings=$snapshotFallbackSettings), " +
+    s"validateDeserialization=$validateDeserialization"
 }
 
 final class QuerySettings(config: Config) {

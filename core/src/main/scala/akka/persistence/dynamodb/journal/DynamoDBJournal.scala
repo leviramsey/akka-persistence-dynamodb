@@ -12,6 +12,7 @@ import scala.concurrent.Future
 import scala.util.Failure
 import scala.util.Success
 import scala.util.Try
+import scala.util.control.NonFatal
 
 import akka.Done
 import akka.actor.ActorRef
@@ -23,6 +24,7 @@ import akka.persistence.AtomicWrite
 import akka.persistence.PersistentRepr
 import akka.persistence.SerializedEvent
 import akka.persistence.dynamodb.DynamoDBSettings
+import akka.persistence.dynamodb.InstrumentationProvider
 import akka.persistence.dynamodb.internal.InstantFactory
 import akka.persistence.dynamodb.internal.JournalDao
 import akka.persistence.dynamodb.internal.PubSub
@@ -41,7 +43,6 @@ import akka.serialization.Serializers
 import akka.stream.scaladsl.Sink
 import com.typesafe.config.Config
 import software.amazon.awssdk.services.dynamodb.model.ProvisionedThroughputExceededException
-import akka.persistence.dynamodb.InstrumentationProvider
 
 /**
  * INTERNAL API
@@ -146,7 +147,7 @@ private[dynamodb] final class DynamoDBJournal(config: Config, cfgPath: String)
           // monotonically increasing, at least 1 microsecond more than previous timestamp
           val timestamp = InstantFactory.now()
 
-          SerializedJournalItem(
+          val ret = SerializedJournalItem(
             pr.persistenceId,
             pr.sequenceNr,
             timestamp,
@@ -157,6 +158,19 @@ private[dynamodb] final class DynamoDBJournal(config: Config, cfgPath: String)
             pr.writerUuid,
             tags,
             metadata)
+
+          if (settings.validateDeserialization) {
+            try {
+              deserializeItem(serialization, ret)
+            } catch {
+              case NonFatal(ex) =>
+                throw new IllegalArgumentException(
+                  s"Potential poison event of class [${event.getClass.getName}] was not deserializable",
+                  ex)
+            }
+          }
+
+          ret
         }
       }
 

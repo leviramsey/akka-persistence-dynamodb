@@ -17,6 +17,7 @@ import akka.actor.ClassicActorSystemProvider
 import akka.actor.testkit.typed.scaladsl.LogCapturing
 import akka.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
 import akka.actor.testkit.typed.scaladsl.{ TestProbe => TypedTestProbe }
+import akka.actor.typed.{ ActorRef => TypedActorRef }
 import akka.actor.typed.ActorSystem
 import akka.actor.typed.scaladsl.adapter._
 import akka.persistence.AtomicWrite
@@ -39,12 +40,16 @@ import akka.persistence.dynamodb.internal.FallbackStoreProvider
 import akka.persistence.dynamodb.internal.InMemFallbackStore
 import akka.persistence.dynamodb.internal.InstantFactory
 import akka.persistence.dynamodb.util.ClientProvider
+import akka.persistence.dynamodb.UnluckyString
 import akka.persistence.journal.JournalSpec
+import akka.persistence.typed.scaladsl.EventSourcedBehavior
+import akka.persistence.typed.scaladsl.Effect
 import akka.serialization.SerializationExtension
 import akka.serialization.Serializers
 import akka.stream.testkit.TestSubscriber
 import akka.stream.testkit.scaladsl.TestSink
 import akka.testkit.TestProbe
+import akka.Done
 import com.typesafe.config.Config
 import com.typesafe.config.ConfigFactory
 import org.scalatest.Inspectors
@@ -520,6 +525,47 @@ class DynamoDBJournalWithEagerFallbackSpec
       eventually {
         FallbackStoreProvider(system).getFallbackStore(plugin) shouldNot be(empty)
       }
+    }
+  }
+}
+
+class DynamoDBPoisonEventSpec
+    extends ScalaTestWithActorTestKit(DynamoDBJournalSpec.config)
+    with AnyWordSpecLike
+    with TestDbLifecycle
+    with TestData
+    with LogCapturing {
+
+  def typedSystem: ActorSystem[_] = testKit.system
+
+  class Setup {
+    val persistenceId = nextPersistenceId(nextEntityType())
+
+    def testBehavior(ref: TypedActorRef[Done]) = EventSourcedBehavior[String, UnluckyString, String](
+      persistenceId = persistenceId,
+      commandHandler = (_, str) => Effect.persist(UnluckyString(str)).thenRun(_ => ref ! Done),
+      eventHandler = (state, evt) => if (state.isEmpty) evt.string else s"$state|${evt.string}",
+      emptyState = "")
+
+    val journal = persistenceExt.journalFor("akka.persistence.dynamodb.journal")
+    val probe = testKit.createTestProbe[Any]()
+    val classicProbeRef = probe.ref.toClassic
+  }
+
+  "A DynamoDB journal" should {
+    "reject writes of events that cannot be deserialized" in new Setup {
+      val persistentActor = testKit.spawn(testBehavior(probe.ref.narrow))
+      persistentActor ! "hi"
+      probe.expectMessage(Done)
+      persistentActor ! "1234567"
+      probe.expectNoMessage()
+      probe.expectTerminated(persistentActor)
+
+      journal.tell(ReplayMessages(1, 10, 10, persistenceId.id, classicProbeRef), classicProbeRef)
+      val firstReplayed = probe.expectMessageType[ReplayedMessage]
+      firstReplayed.persistent.sequenceNr shouldBe 1
+      firstReplayed.persistent.payload shouldBe UnluckyString("hi")
+      probe.expectMessage(RecoverySuccess(1))
     }
   }
 }
