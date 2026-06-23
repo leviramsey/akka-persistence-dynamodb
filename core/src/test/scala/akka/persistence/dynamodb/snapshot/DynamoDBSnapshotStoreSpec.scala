@@ -11,6 +11,7 @@ import scala.concurrent.duration._
 import scala.jdk.FutureConverters.CompletionStageOps
 import scala.util.Random
 
+import akka.Done
 import akka.actor.typed.ActorSystem
 import akka.actor.typed.scaladsl.adapter._
 import akka.actor.testkit.typed.scaladsl.LogCapturing
@@ -19,6 +20,9 @@ import akka.actor.testkit.typed.scaladsl.{ TestProbe => TypedTestProbe }
 import akka.actor.typed.{ ActorRef => TypedActorRef }
 import akka.persistence.CapabilityFlag
 import akka.persistence.DeleteSnapshotSuccess
+import akka.persistence.JournalProtocol.ReplayedMessage
+import akka.persistence.JournalProtocol.ReplayMessages
+import akka.persistence.JournalProtocol.RecoverySuccess
 import akka.persistence.SaveSnapshotSuccess
 import akka.persistence.SnapshotMetadata
 import akka.persistence.SnapshotProtocol.DeleteSnapshot
@@ -29,11 +33,14 @@ import akka.persistence.SnapshotSelectionCriteria
 import akka.persistence.dynamodb.TestConfig
 import akka.persistence.dynamodb.TestData
 import akka.persistence.dynamodb.TestDbLifecycle
+import akka.persistence.dynamodb.UnluckyString
 import akka.persistence.dynamodb.internal.FallbackStoreProvider
 import akka.persistence.dynamodb.internal.InMemFallbackStore
 import akka.persistence.dynamodb.internal.SnapshotAttributes
 import akka.persistence.dynamodb.util.ClientProvider
 import akka.persistence.snapshot.SnapshotStoreSpec
+import akka.persistence.typed.scaladsl.EventSourcedBehavior
+import akka.persistence.typed.scaladsl.Effect
 import akka.serialization.SerializationExtension
 import akka.serialization.Serializers
 import akka.stream.testkit.scaladsl.TestSink
@@ -48,13 +55,6 @@ import org.scalatest.wordspec.AnyWordSpecLike
 import software.amazon.awssdk.core.SdkBytes
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest
-import akka.persistence.typed.scaladsl.EventSourcedBehavior
-import akka.persistence.typed.scaladsl.Effect
-import akka.Done
-import akka.persistence.dynamodb.UnluckyString
-import akka.persistence.JournalProtocol.ReplayedMessage
-import akka.persistence.JournalProtocol.ReplayMessages
-import akka.persistence.JournalProtocol.RecoverySuccess
 
 object DynamoDBSnapshotStoreSpec {
   val config: Config = TestConfig.config

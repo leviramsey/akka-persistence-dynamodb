@@ -12,6 +12,7 @@ import scala.concurrent.duration._
 import scala.jdk.FutureConverters.CompletionStageOps
 import scala.util.Random
 
+import akka.Done
 import akka.actor.ActorRef
 import akka.actor.ClassicActorSystemProvider
 import akka.actor.testkit.typed.scaladsl.LogCapturing
@@ -49,7 +50,6 @@ import akka.serialization.Serializers
 import akka.stream.testkit.TestSubscriber
 import akka.stream.testkit.scaladsl.TestSink
 import akka.testkit.TestProbe
-import akka.Done
 import com.typesafe.config.Config
 import com.typesafe.config.ConfigFactory
 import org.scalatest.Inspectors
