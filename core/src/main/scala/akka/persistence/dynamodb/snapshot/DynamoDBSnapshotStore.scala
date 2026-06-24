@@ -119,7 +119,7 @@ private[dynamodb] final class DynamoDBSnapshotStore(cfg: Config, cfgPath: String
         } catch {
           case NonFatal(ex) =>
             throw new IllegalArgumentException(
-              s"Potential poison snapshot of class [${snapshot.getClass.getName}] was not deserializable",
+              s"Potential poison snapshot of class [${snapshot.getClass.getName}] was not deserializable: persistenceId=[${metadata.persistenceId}]",
               ex)
         }
       }

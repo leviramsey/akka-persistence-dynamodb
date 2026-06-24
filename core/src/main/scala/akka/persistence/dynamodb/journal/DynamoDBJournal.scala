@@ -165,7 +165,7 @@ private[dynamodb] final class DynamoDBJournal(config: Config, cfgPath: String)
             } catch {
               case NonFatal(ex) =>
                 throw new IllegalArgumentException(
-                  s"Potential poison event of class [${event.getClass.getName}] was not deserializable",
+                  s"Potential poison event of class [${event.getClass.getName}] was not deserializable: persistenceId [${pr.persistenceId}]",
                   ex)
             }
           }
