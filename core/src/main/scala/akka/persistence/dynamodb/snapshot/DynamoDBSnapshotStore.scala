@@ -8,6 +8,7 @@ import java.time.Instant
 
 import scala.concurrent.ExecutionContext
 import scala.concurrent.Future
+import scala.util.control.NonFatal
 
 import akka.actor.typed.ActorSystem
 import akka.actor.typed.scaladsl.adapter._
@@ -112,6 +113,16 @@ private[dynamodb] final class DynamoDBSnapshotStore(cfg: Config, cfgPath: String
         tags,
         serializedMeta)
 
+      if (settings.validateDeserialization) {
+        try {
+          deserializeSnapshotItem(snapshotItem, serialization)
+        } catch {
+          case NonFatal(ex) =>
+            throw new IllegalArgumentException(
+              s"Potential poison snapshot of class [${snapshot.getClass.getName}] was not deserializable: persistenceId=[${metadata.persistenceId}]",
+              ex)
+        }
+      }
       snapshotDao.store(snapshotItem)
     }
   }

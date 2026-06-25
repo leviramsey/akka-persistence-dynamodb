@@ -11,13 +11,18 @@ import scala.concurrent.duration._
 import scala.jdk.FutureConverters.CompletionStageOps
 import scala.util.Random
 
+import akka.Done
 import akka.actor.typed.ActorSystem
 import akka.actor.typed.scaladsl.adapter._
 import akka.actor.testkit.typed.scaladsl.LogCapturing
 import akka.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
 import akka.actor.testkit.typed.scaladsl.{ TestProbe => TypedTestProbe }
+import akka.actor.typed.{ ActorRef => TypedActorRef }
 import akka.persistence.CapabilityFlag
 import akka.persistence.DeleteSnapshotSuccess
+import akka.persistence.JournalProtocol.ReplayedMessage
+import akka.persistence.JournalProtocol.ReplayMessages
+import akka.persistence.JournalProtocol.RecoverySuccess
 import akka.persistence.SaveSnapshotSuccess
 import akka.persistence.SnapshotMetadata
 import akka.persistence.SnapshotProtocol.DeleteSnapshot
@@ -28,11 +33,14 @@ import akka.persistence.SnapshotSelectionCriteria
 import akka.persistence.dynamodb.TestConfig
 import akka.persistence.dynamodb.TestData
 import akka.persistence.dynamodb.TestDbLifecycle
+import akka.persistence.dynamodb.UnluckyString
 import akka.persistence.dynamodb.internal.FallbackStoreProvider
 import akka.persistence.dynamodb.internal.InMemFallbackStore
 import akka.persistence.dynamodb.internal.SnapshotAttributes
 import akka.persistence.dynamodb.util.ClientProvider
 import akka.persistence.snapshot.SnapshotStoreSpec
+import akka.persistence.typed.scaladsl.EventSourcedBehavior
+import akka.persistence.typed.scaladsl.Effect
 import akka.serialization.SerializationExtension
 import akka.serialization.Serializers
 import akka.stream.testkit.scaladsl.TestSink
@@ -366,5 +374,86 @@ class DynamoDBSnapshotFallbackSpec
     invocationsProbe.request(1)
     test(fallbackStore, invocationsProbe)
     invocationsProbe.cancel()
+  }
+}
+
+class DynamoDBPoisonSnapshotSpec
+    extends ScalaTestWithActorTestKit(DynamoDBSnapshotStoreSpec.config)
+    with AnyWordSpecLike
+    with TestData
+    with TestDbLifecycle
+    with LogCapturing {
+  def typedSystem: ActorSystem[_] = testKit.system
+
+  class Setup {
+    val persistenceId = nextPersistenceId(nextEntityType())
+
+    def testBehavior(ref: TypedActorRef[Done]) = EventSourcedBehavior[String, String, UnluckyString](
+      persistenceId = persistenceId,
+      emptyState = UnluckyString(""),
+      commandHandler = (state, str) =>
+        if (state.string.endsWith("|sealed")) {
+          ref ! Done
+          if (str == "stop") Effect.stop() else Effect.none
+        } else Effect.persist(str).thenRun(_ => ref ! Done),
+      eventHandler =
+        (state, evt) => if (state.string.isEmpty) UnluckyString(evt) else UnluckyString(s"${state.string}|$evt"))
+      .snapshotWhen((_, _, seqNr) => (seqNr % 2) == 0)
+
+    val journal = persistenceExt.journalFor("akka.persistence.dynamodb.journal")
+    val snapshotStore = persistenceExt.snapshotStoreFor("akka.persistence.dynamodb.snapshot")
+    val probe = testKit.createTestProbe[Any]()
+    val classicProbeRef = probe.ref.toClassic
+  }
+
+  "A DynamoDB snapshot store" should {
+    "not persist snapshots that can't be deserialized" in new Setup {
+      val persistentActor = testKit.spawn(testBehavior(probe.ref.narrow))
+      persistentActor ! "hi"
+      probe.expectMessage(Done)
+      // state is "hi"
+      persistentActor ! "heyo"
+      // state is "hi|heyo"... snapshot is requested but is not written
+      probe.expectMessage(Done)
+
+      snapshotStore.tell(
+        LoadSnapshot(persistenceId.id, SnapshotSelectionCriteria.Latest, Long.MaxValue),
+        classicProbeRef)
+
+      probe.expectMessageType[LoadSnapshotResult].snapshot shouldBe empty
+
+      persistentActor ! "stop"
+      probe.expectMessage(Done)
+      persistentActor ! "sealed"
+      probe.expectMessage(Done)
+
+      snapshotStore.tell(
+        LoadSnapshot(persistenceId.id, SnapshotSelectionCriteria.Latest, Long.MaxValue),
+        classicProbeRef)
+
+      var snapshot = probe.expectMessageType[LoadSnapshotResult]
+      snapshot.snapshot shouldNot be(empty)
+      snapshot.snapshot.get.snapshot shouldBe UnluckyString("hi|heyo|stop|sealed")
+
+      journal.tell(ReplayMessages(1, 10, 10, persistenceId.id, classicProbeRef), classicProbeRef)
+      probe.receiveMessages(4).iterator.map(_.getClass).toSet should contain theSameElementsAs (Set(
+        classOf[ReplayedMessage]))
+      probe.expectMessage(RecoverySuccess(4))
+
+      persistentActor ! "stop"
+      probe.expectMessage(Done)
+      probe.expectTerminated(persistentActor)
+
+      snapshotStore.tell(
+        LoadSnapshot(persistenceId.id, SnapshotSelectionCriteria.Latest, Long.MaxValue),
+        classicProbeRef)
+
+      snapshot = probe.expectMessageType[LoadSnapshotResult]
+      snapshot.snapshot shouldNot be(empty)
+      snapshot.snapshot.get.snapshot shouldBe UnluckyString("hi|heyo|stop|sealed")
+
+      journal.tell(ReplayMessages(snapshot.toSequenceNr + 1, 10, 5, persistenceId.id, classicProbeRef), classicProbeRef)
+      probe.expectMessage(RecoverySuccess(4))
+    }
   }
 }
