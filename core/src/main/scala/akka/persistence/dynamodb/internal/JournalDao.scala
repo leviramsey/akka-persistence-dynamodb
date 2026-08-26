@@ -11,6 +11,7 @@ import java.util.concurrent.CompletionException
 import java.util.Base64
 import java.util.Locale
 import java.util.{ HashMap => JHashMap }
+import java.util.{ Map => JMap }
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
@@ -203,10 +204,20 @@ import software.amazon.awssdk.services.dynamodb.model.Update
 
     if (totalItems == 1) {
       val item = items.head
+      val timestampSeconds = item.writeTimestamp.getEpochSecond.toString
       val result = client.putItem { putItemBuilder =>
         putItemBuilder
           .tableName(settings.journalTable)
           .item(putItemAttributes(item))
+          .expressionAttributeValues(
+            JMap.of(
+              JournalAttributes.ColonWriter,
+              AttributeValue.fromS(item.writerUuid),
+              ":now",
+              AttributeValue.fromN(timestampSeconds)))
+          .conditionExpression(
+            JournalAttributes.UniqueEventWithExpiry
+          ) // enforces uniqueness of (Pid, SeqNr), allowing retries
           .returnConsumedCapacity(ReturnConsumedCapacity.TOTAL)
       }.asScala
 
@@ -231,11 +242,22 @@ import software.amazon.awssdk.services.dynamodb.model.Update
           Future.failed(c.getCause)
         }(ExecutionContext.parasitic)
     } else {
+      val timestampSeconds = items.head.writeTimestamp.getEpochSecond.toString
       val writeItems = items.map { item =>
         TransactWriteItem
           .builder()
           .put { putBuilder =>
-            putBuilder.tableName(settings.journalTable).item(putItemAttributes(item)).build
+            putBuilder
+              .tableName(settings.journalTable)
+              .item(putItemAttributes(item))
+              .expressionAttributeValues(
+                JMap.of(
+                  JournalAttributes.ColonWriter,
+                  AttributeValue.fromS(item.writerUuid),
+                  ":now",
+                  AttributeValue.fromN(timestampSeconds)))
+              .conditionExpression(JournalAttributes.UniqueEventWithExpiry)
+              .build
           }
           .build
       }.asJava
