@@ -252,7 +252,7 @@ private[dynamodb] final class DynamoDBJournal(config: Config, cfgPath: String)
       case None => FutureDone
     }
     pendingWrite.flatMap { _ =>
-      val highestSeqNrAndTimestamp = if (toSequenceNr == Long.MaxValue && max == Long.MaxValue) {
+      val highestSeqNrAndTimestamp = if (fromSequenceNr >= 0 && toSequenceNr == Long.MaxValue && max == Long.MaxValue) {
         // this is the normal case, highest sequence number from last event
         query
           .internalCurrentEventsByPersistenceId(persistenceId, fromSequenceNr, toSequenceNr, includeDeleted = true)
@@ -266,6 +266,29 @@ private[dynamodb] final class DynamoDBJournal(config: Config, cfgPath: String)
             }
             (item.seqNr, item.writeTimestamp)
           })
+      } else if (fromSequenceNr < 0) {
+        // replay only latest event
+        journalDao
+          .readHighestSequenceNrAndTimestamp(persistenceId)
+          .flatMap { case r @ (highestSeqNr, timestamp) =>
+            if (highestSeqNr > 0) {
+              query
+                .internalCurrentEventsByPersistenceId(
+                  persistenceId,
+                  toSequenceNr.min(highestSeqNr),
+                  toSequenceNr.min(highestSeqNr),
+                  includeDeleted = true)
+                .runWith(Sink.foreach { case (item, context) =>
+                  if (item.payload.isDefined) {
+                    instrumentation.beforeDeserializeEvent(context)
+                    val repr = deserializeItem(serialization, item)
+                    instrumentation.afterDeserializeEvent(context)
+                    recoveryCallback(repr)
+                  }
+                })
+                .map(_ => r)(ExecutionContext.parasitic)
+            } else Future.successful(r)
+          }
       } else if (toSequenceNr <= 0) {
         // no replay
         journalDao.readHighestSequenceNrAndTimestamp(persistenceId)

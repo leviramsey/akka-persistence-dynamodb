@@ -30,6 +30,7 @@ import akka.persistence.JournalProtocol.RecoverySuccess
 import akka.persistence.JournalProtocol.ReplayMessages
 import akka.persistence.JournalProtocol.ReplayedMessage
 import akka.persistence.JournalProtocol.WriteMessages
+import akka.persistence.JournalProtocol.WriteMessageSuccess
 import akka.persistence.JournalProtocol.WriteMessagesSuccessful
 import akka.persistence.PersistentRepr
 import akka.persistence.dynamodb.InstrumentationProvider
@@ -406,6 +407,82 @@ class DynamoDBJournalSpec extends DynamoDBJournalBaseSpec(DynamoDBJournalSpec.co
       }
       ebpic.probe.expectNoMessage(30.millis)
       instrumentation.probe.expectNoMessage(10.millis)
+    }
+
+    "replay only the latest event when fromSequenceNr is -1" in {
+      val pid = nextPersistenceId(entityType).id
+      val writerUuid = UUID.randomUUID().toString
+      writeMessages(1, 5, pid, ActorRef.noSender, writerUuid)
+
+      val probe = TestProbe()
+      journal ! ReplayMessages(-1, Long.MaxValue, 1, pid, probe.ref)
+      probe.expectMsgPF() { case ReplayedMessage(persistent) =>
+        persistent.payload shouldBe "a-5"
+        persistent.sequenceNr shouldBe 5
+      }
+      probe.expectMsg(RecoverySuccess(5))
+    }
+
+    "include metadata when replaying only the latest event" in {
+      val pid = nextPersistenceId(entityType).id
+      val writerUuid = UUID.randomUUID().toString
+      writeMessages(1, 2, pid, ActorRef.noSender, writerUuid)
+
+      val writeProbe = TestProbe()
+      val repr = PersistentRepr(payload = "a-3", sequenceNr = 3, persistenceId = pid, writerUuid = writerUuid)
+        .withMetadata("meta-3")
+      journal ! WriteMessages(Seq(AtomicWrite(repr)), writeProbe.ref, actorInstanceId)
+      writeProbe.expectMsg(WriteMessagesSuccessful)
+      writeProbe.expectMsgType[WriteMessageSuccess]
+
+      eventually(timeout(3.seconds), interval(100.millis)) {
+        val probe = TestProbe()
+        journal ! ReplayMessages(-1, Long.MaxValue, 1, pid, probe.ref)
+        probe.expectMsgPF() { case ReplayedMessage(persistent) =>
+          persistent.sequenceNr shouldBe 3
+          persistent.metadata shouldBe Some("meta-3")
+        }
+        probe.expectMsg(RecoverySuccess(3))
+      }
+    }
+
+    "replay nothing when fromSequenceNr is -1 and there are no events" in {
+      val pid = nextPersistenceId(entityType).id
+      val probe = TestProbe()
+      journal ! ReplayMessages(-1, Long.MaxValue, 1, pid, probe.ref)
+      probe.expectMsg(RecoverySuccess(0))
+    }
+
+    "replay nothing but report the highest seqNr when fromSequenceNr is -1 and the latest event is deleted" in {
+      val pid = nextPersistenceId(entityType).id
+      val writerUuid = UUID.randomUUID().toString
+      writeMessages(1, 3, pid, ActorRef.noSender, writerUuid)
+
+      val deleteProbe = TestProbe()
+      journal ! DeleteMessagesTo(pid, 3, deleteProbe.ref)
+      deleteProbe.expectMsgType[DeleteMessagesSuccess]
+
+      eventually(timeout(3.seconds), interval(100.millis)) {
+        val probe = TestProbe()
+        journal ! ReplayMessages(-1, Long.MaxValue, 1, pid, probe.ref)
+        // the tombstone keeps the highest seqNr, but has no payload (or metadata)
+        probe.expectMsg(RecoverySuccess(3))
+      }
+    }
+
+    "replay all events when fromSequenceNr is 0" in {
+      val pid = nextPersistenceId(entityType).id
+      val writerUuid = UUID.randomUUID().toString
+      writeMessages(1, 3, pid, ActorRef.noSender, writerUuid)
+
+      val probe = TestProbe()
+      journal ! ReplayMessages(0, Long.MaxValue, Long.MaxValue, pid, probe.ref)
+      (1 to 3).foreach { expectedSeqNr =>
+        probe.expectMsgPF() { case ReplayedMessage(persistent) =>
+          persistent.sequenceNr shouldBe expectedSeqNr
+        }
+      }
+      probe.expectMsg(RecoverySuccess(3))
     }
   }
 }
