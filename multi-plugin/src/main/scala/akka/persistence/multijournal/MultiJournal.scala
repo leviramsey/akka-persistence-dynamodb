@@ -192,7 +192,10 @@ private[multijournal] object MultiJournal {
 
           if (pendingReplay.orElse[Any](pendingWrite).nonEmpty) {
             val stash = createStash()
-            stash.prepend(Iterator(pendingReplay, pendingWrite).flatten.map(m => Envelope(m, ActorRef.noSender)).toSeq)
+            stash.prepend(
+              Iterator(pendingReplay, pendingWrite).flatten
+                .map(m => Envelope(m, ActorRef.noSender, context.system))
+                .toSeq)
             stash.unstashAll()
           }
           pendingReplay = None
