@@ -2,12 +2,14 @@
  * Copyright (C) 2024-2026 Lightbend Inc. <https://akka.io>
  */
 
+package akka.persistence.multijournal
+
 import scala.reflect.ClassTag
 
 import akka.actor.testkit.typed.scaladsl.TestProbe
 import akka.testkit.TestKit
 
-package object multijournal {
+object ProbeOps {
   implicit class ExpectMessageTypeAndAssert[T](val probe: TestProbe[T]) extends ExpectAndAssert[T] {
     protected def expectMessageType[S <: T: ClassTag](): S = probe.expectMessageType
   }

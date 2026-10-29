@@ -25,7 +25,7 @@ class WriteSpec
     with BeforeAndAfterEach
     with LogCapturing
     with TestData {
-  import multijournal._
+  import ProbeOps._
   import ReplaySpec._
 
   implicit val classicSystem: akka.actor.ActorSystem = system.classicSystem

@@ -4,11 +4,14 @@
 
 package akka.persistence.multijournal
 
+import java.time.Instant
+
 import scala.concurrent.Promise
 import scala.concurrent.Future
 import scala.concurrent.duration.DurationInt
 
 import akka.actor.testkit.typed.scaladsl.LogCapturing
+import akka.actor.testkit.typed.scaladsl.LoggingTestKit
 import akka.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
 import akka.testkit.TestProbe
 import akka.persistence.JournalProtocol
@@ -16,10 +19,8 @@ import akka.persistence.Persistence
 import akka.persistence.PersistentRepr
 import com.typesafe.config.Config
 import com.typesafe.config.ConfigFactory
-import org.scalatest.wordspec.AnyWordSpecLike
-import java.time.Instant
 import org.scalatest.BeforeAndAfterEach
-import akka.actor.testkit.typed.scaladsl.LoggingTestKit
+import org.scalatest.wordspec.AnyWordSpecLike
 
 object ReplaySpec {
   val Journals = ConfigFactory.empty
@@ -91,7 +92,7 @@ abstract class SingleJournalReplaySpecBase(config: Config, journalId: Int)
     with BeforeAndAfterEach
     with LogCapturing
     with TestData {
-  import multijournal._
+  import ProbeOps._
   import ReplaySpec._
 
   implicit val classicSystem: akka.actor.ActorSystem = system.classicSystem
@@ -169,7 +170,7 @@ abstract class SingleJournalReplaySpecBase(config: Config, journalId: Int)
         rhsn.fromSequenceNr shouldBe 0
         rhsn.promise.success(10)
       }
-      val eventsFromColdJournal = coldJournalProbe.asserting { rm: TestProbeJournal.ReplayMessages =>
+      val eventsFromColdJournal = coldJournalProbe.asserting { (rm: TestProbeJournal.ReplayMessages) =>
         rm.pid shouldBe pid
         rm.fromSequenceNr shouldBe 1
         rm.toSequenceNr shouldBe 10
@@ -195,7 +196,7 @@ abstract class SingleJournalReplaySpecBase(config: Config, journalId: Int)
         rhsn.fromSequenceNr shouldBe 0
         rhsn.promise.success(11)
       }
-      val eventsFromColdJournal = coldJournalProbe.asserting { rm: TestProbeJournal.ReplayMessages =>
+      val eventsFromColdJournal = coldJournalProbe.asserting { (rm: TestProbeJournal.ReplayMessages) =>
         rm.pid shouldBe pid
         rm.fromSequenceNr shouldBe 1
         rm.toSequenceNr shouldBe 11
@@ -250,7 +251,7 @@ abstract class SingleJournalReplaySpecBase(config: Config, journalId: Int)
         rhsn.fromSequenceNr shouldBe 420
         rhsn.promise.success(567)
       }
-      val eventsFromColdJournal = coldJournalProbe.asserting { rm: TestProbeJournal.ReplayMessages =>
+      val eventsFromColdJournal = coldJournalProbe.asserting { (rm: TestProbeJournal.ReplayMessages) =>
         rm.pid shouldBe pid
         rm.fromSequenceNr shouldBe 421
         rm.toSequenceNr shouldBe 567
@@ -275,7 +276,7 @@ abstract class SingleJournalReplaySpecBase(config: Config, journalId: Int)
       coldJournalProbe.asserting[TestProbeJournal.ReadHighestSeqNr] { rhsn =>
         rhsn.promise.success(1000)
       }
-      val eventsFromColdJournal = coldJournalProbe.asserting { rm: TestProbeJournal.ReplayMessages =>
+      val eventsFromColdJournal = coldJournalProbe.asserting { (rm: TestProbeJournal.ReplayMessages) =>
         rm.pid shouldBe pid
         rm.fromSequenceNr shouldBe 50
         rm.toSequenceNr shouldBe 550
@@ -326,7 +327,7 @@ abstract class SingleJournalReplaySpecBase(config: Config, journalId: Int)
         rhsn.fromSequenceNr shouldBe 0
         rhsn.promise.success(27)
       }
-      val evt = coldJournalProbe.asserting { rm: TestProbeJournal.ReplayMessages =>
+      val evt = coldJournalProbe.asserting { (rm: TestProbeJournal.ReplayMessages) =>
         rm.fromSequenceNr shouldBe -1
         rm.toSequenceNr shouldBe 27
         val genEvent = event(27, Instant.now(), metadataForEarlierEvents(13))
@@ -470,7 +471,7 @@ abstract class SingleJournalReplaySpecBase(config: Config, journalId: Int)
         rhsn.fromSequenceNr shouldBe 0
         rhsn.promise.success(100)
       }
-      val lastEvent = coldJournalProbe.asserting { rm: TestProbeJournal.ReplayMessages =>
+      val lastEvent = coldJournalProbe.asserting { (rm: TestProbeJournal.ReplayMessages) =>
         rm.fromSequenceNr shouldBe -1
         rm.toSequenceNr shouldBe 100
         val evt = event(100, Instant.now(), None)
@@ -529,7 +530,7 @@ class TwoJournalReplaySpec
     with BeforeAndAfterEach
     with LogCapturing
     with TestData {
-  import multijournal._
+  import ProbeOps._
   import ReplaySpec._
 
   implicit val classicSystem: akka.actor.ActorSystem = system.classicSystem
@@ -608,7 +609,7 @@ class TwoJournalReplaySpec
     "proxy replay (no snapshot) [events in cold journal]" in new Setup(this) {
       startReplay(this, 1, Long.MaxValue, Long.MaxValue)
       coldJournalProbe.expectMessageType[TestProbeJournal.ReadHighestSeqNr].promise.success(10)
-      val events = coldJournalProbe.asserting { rm: TestProbeJournal.ReplayMessages =>
+      val events = coldJournalProbe.asserting { (rm: TestProbeJournal.ReplayMessages) =>
         rm.pid shouldBe pid
         rm.fromSequenceNr shouldBe 1
         rm.toSequenceNr shouldBe 10
@@ -627,7 +628,7 @@ class TwoJournalReplaySpec
     "proxy replay (no snapshot) [deleted events in cold journal]" in new Setup(this) {
       startReplay(this, 1, Long.MaxValue, Long.MaxValue)
       coldJournalProbe.expectMessageType[TestProbeJournal.ReadHighestSeqNr].promise.success(11)
-      val events = coldJournalProbe.asserting { rm: TestProbeJournal.ReplayMessages =>
+      val events = coldJournalProbe.asserting { (rm: TestProbeJournal.ReplayMessages) =>
         rm.fromSequenceNr shouldBe 1
         rm.toSequenceNr shouldBe 11
         val events = (6 to 11).map(event(_, Instant.now(), None))
@@ -656,7 +657,7 @@ class TwoJournalReplaySpec
       val snapshotSeqNr = 420L
       startReplay(this, snapshotSeqNr + 1, Long.MaxValue, Long.MaxValue)
       coldJournalProbe.expectMessageType[TestProbeJournal.ReadHighestSeqNr].promise.success(567)
-      val events = coldJournalProbe.asserting { rm: TestProbeJournal.ReplayMessages =>
+      val events = coldJournalProbe.asserting { (rm: TestProbeJournal.ReplayMessages) =>
         rm.fromSequenceNr shouldBe 421
         rm.toSequenceNr shouldBe 567
         val events = (499 to 567).map(event(_, Instant.now(), None))
@@ -673,7 +674,7 @@ class TwoJournalReplaySpec
     "proxy bounded replays" in new Setup(this) {
       startReplay(this, 50, 550, 501)
       coldJournalProbe.expectMessageType[TestProbeJournal.ReadHighestSeqNr].promise.success(1000)
-      val events = coldJournalProbe.asserting { rm: TestProbeJournal.ReplayMessages =>
+      val events = coldJournalProbe.asserting { (rm: TestProbeJournal.ReplayMessages) =>
         rm.fromSequenceNr shouldBe 50
         rm.toSequenceNr shouldBe 550
         rm.max shouldBe 501
@@ -710,7 +711,7 @@ class TwoJournalReplaySpec
     "support the replay-only-last query" in new Setup(this) {
       startReplay(this, -1, Long.MaxValue, Long.MaxValue)
       coldJournalProbe.expectMessageType[TestProbeJournal.ReadHighestSeqNr].promise.success(27)
-      val evt = coldJournalProbe.asserting { rm: TestProbeJournal.ReplayMessages =>
+      val evt = coldJournalProbe.asserting { (rm: TestProbeJournal.ReplayMessages) =>
         rm.fromSequenceNr shouldBe -1
         rm.toSequenceNr shouldBe 27
         val evt = event(27, Instant.now(), None)
@@ -945,7 +946,7 @@ class ThreeJournalReplaySpec
     with BeforeAndAfterEach
     with LogCapturing
     with TestData {
-  import multijournal._
+  import ProbeOps._
   import ReplaySpec._
 
   implicit val classicSystem: akka.actor.ActorSystem = system.classicSystem
